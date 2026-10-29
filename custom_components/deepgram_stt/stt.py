@@ -76,13 +76,16 @@ def _wrap_websockets_connect(orig_connect: Any, ssl_context: ssl.SSLContext) -> 
 
 async def _create_deepgram_client(hass: HomeAssistant, api_key: str) -> AsyncDeepgramClient:
     """Create a Deepgram client outside the event loop and cache its headers."""
+    _LOGGER.info("[DIAGNOSE] Creating AsyncDeepgramClient")
     client = await hass.async_add_executor_job(
         lambda: AsyncDeepgramClient(api_key=api_key)
     )
+    _LOGGER.info("[DIAGNOSE] AsyncDeepgramClient created: %s", type(client).__name__)
     # Access SDK internals to warm up and cache headers; avoids repeated
     # importlib.metadata blocking IO inside the event loop.
     client_wrapper = client._client_wrapper  # noqa: SLF001
     cached_headers = await hass.async_add_executor_job(client_wrapper.get_headers)
+    _LOGGER.info("[DIAGNOSE] Headers cached, type: %s", type(cached_headers).__name__)
     client_wrapper.get_headers = lambda: cached_headers
     await _get_ssl_context(hass)
     return client
@@ -176,16 +179,22 @@ class DeepgramSTTEntity(SpeechToTextEntity):
             async def on_message(message, **kwargs):
                 nonlocal transcript_parts, final_transcript, is_final
 
-                _LOGGER.debug("Received message from Deepgram: type=%s", type(message).__name__)
+                _LOGGER.info(
+                    "[DIAGNOSE] Received message from Deepgram: type=%s class=%s",
+                    getattr(message, "type", "N/A"),
+                    type(message).__name__,
+                )
 
                 if not isinstance(message, ListenV1Results):
+                    _LOGGER.info("[DIAGNOSE] Ignoring non-Results message: %s", type(message).__name__)
                     return
 
                 if not message.channel.alternatives:
-                    _LOGGER.debug("Message channel has no alternatives")
+                    _LOGGER.info("[DIAGNOSE] Results message has no alternatives")
                     return
 
                 sentence = message.channel.alternatives[0].transcript
+                _LOGGER.info("[DIAGNOSE] Got transcript fragment: '%s' is_final=%s", sentence, message.is_final)
 
                 if len(sentence) > 0:
                     async with state_lock:
@@ -201,11 +210,12 @@ class DeepgramSTTEntity(SpeechToTextEntity):
 
             async def on_error(error, **kwargs):
                 nonlocal error_occurred
-                _LOGGER.error("Deepgram error: %s", error)
+                _LOGGER.error("[DIAGNOSE] Deepgram error: %s", error)
                 error_occurred = True
 
             # Connect to Deepgram with async context manager
             # Use v1 API - v2 doesn't support language parameter in Python SDK
+            _LOGGER.info("[DIAGNOSE] Opening Deepgram v1 connection")
             async with client.listen.v1.connect(
                 model=self._model,
                 language=self._language,
@@ -214,13 +224,14 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                 channels=1,
                 interim_results=True,
             ) as dg_connection:
+                _LOGGER.info("[DIAGNOSE] Deepgram connection opened")
                 # Register event handlers
                 dg_connection.on(EventType.MESSAGE, on_message)
                 dg_connection.on(EventType.ERROR, on_error)
 
                 # Start listening for messages in background
                 listen_task = asyncio.create_task(dg_connection.start_listening())
-                _LOGGER.debug("Deepgram connection started, listening task created")
+                _LOGGER.info("[DIAGNOSE] Listening task created")
 
                 # Stream audio data
                 try:
@@ -233,17 +244,26 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                         await dg_connection.send_media(chunk)
                         await asyncio.sleep(STREAM_DELAY)
 
-                    _LOGGER.debug("Audio streaming complete: %d chunks, %d bytes total", chunk_count, total_bytes)
+                    _LOGGER.info(
+                        "[DIAGNOSE] Audio streaming complete: %d chunks, %d bytes total",
+                        chunk_count,
+                        total_bytes,
+                    )
 
                     # Send close stream signal to finalize transcription
                     await dg_connection.send_close_stream()
-                    _LOGGER.debug("Sent CloseStream signal to Deepgram")
+                    _LOGGER.info("[DIAGNOSE] Sent CloseStream signal to Deepgram")
 
                     # Wait for final transcript (with timeout)
                     start_time = asyncio.get_event_loop().time()
                     while True:
                         async with state_lock:
                             if is_final or error_occurred:
+                                _LOGGER.info(
+                                    "[DIAGNOSE] Breaking wait loop: is_final=%s error_occurred=%s",
+                                    is_final,
+                                    error_occurred,
+                                )
                                 break
                         if asyncio.get_event_loop().time() - start_time > TRANSCRIPT_TIMEOUT:
                             _LOGGER.warning("Timeout waiting for final transcript")
@@ -251,28 +271,33 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                         await asyncio.sleep(0.1)
 
                 except Exception as e:  # noqa: BLE001
-                    _LOGGER.error("Error streaming audio: %s", e)
+                    _LOGGER.error("[DIAGNOSE] Error streaming audio: %s", e)
                     return SpeechResult("", SpeechResultState.ERROR)
                 finally:
+                    _LOGGER.info("[DIAGNOSE] Entering finally block, listen_task.done()=%s", listen_task.done())
                     # Give the listener a moment to finish after the close
                     # handshake instead of cancelling it abruptly.
                     if not listen_task.done():
                         try:
                             await asyncio.wait_for(listen_task, timeout=2.0)
+                            _LOGGER.info("[DIAGNOSE] Listener task finished gracefully")
                         except (asyncio.TimeoutError, asyncio.CancelledError):
                             listen_task.cancel()
                             with contextlib.suppress(asyncio.CancelledError):
                                 await listen_task
+                            _LOGGER.info("[DIAGNOSE] Listener task cancelled")
                         except Exception as exc:  # noqa: BLE001
                             _LOGGER.debug("Listener finished with exception: %s", exc)
 
             # Return result (connection auto-closed by context manager)
             async with state_lock:
                 if error_occurred:
+                    _LOGGER.info("[DIAGNOSE] Returning ERROR because error_occurred=True")
                     return SpeechResult("", SpeechResultState.ERROR)
 
                 result_text = final_transcript if final_transcript else " ".join(transcript_parts)
 
+            _LOGGER.info("[DIAGNOSE] Result text assembled: '%s'", result_text)
             if not result_text:
                 _LOGGER.warning("No transcript received")
                 return SpeechResult("", SpeechResultState.ERROR)
@@ -281,5 +306,5 @@ class DeepgramSTTEntity(SpeechToTextEntity):
             return SpeechResult(result_text, SpeechResultState.SUCCESS)
 
         except Exception as e:  # noqa: BLE001
-            _LOGGER.error("Deepgram transcription failed: %s", e)
+            _LOGGER.error("[DIAGNOSE] Deepgram transcription failed: %s", e)
             return SpeechResult("", SpeechResultState.ERROR)
