@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
+from deepgram.listen.v1.types import ListenV1Metadata, ListenV1Results
 import pytest
 
 from custom_components.deepgram_stt.config_flow import ConfigFlow
@@ -353,23 +354,117 @@ class TestDeepgramSTTEventHandlers:
 
             assert result.result == SpeechResultState.ERROR
 
+    @pytest.mark.asyncio
+    async def test_on_message_handler_ignores_metadata_and_processes_results(self, mock_config_entry):
+        """Test on_message handles SDK v7 typed messages correctly."""
+        entity = DeepgramSTTEntity(mock_config_entry)
+
+        mock_metadata = SpeechMetadata(
+            language="pl",
+            format=AudioFormats.WAV,
+            codec=AudioCodecs.PCM,
+            bit_rate=AudioBitRates.BITRATE_16,
+            sample_rate=AudioSampleRates.SAMPLERATE_16000,
+            channel=AudioChannels.CHANNEL_MONO,
+        )
+
+        async def empty_stream():
+            if False:
+                yield b""
+
+        mock_stream = empty_stream()
+
+        mock_connection = AsyncMock()
+        mock_connection.send_media = AsyncMock()
+        mock_connection.send_close_stream = AsyncMock()
+        mock_connection.start_listening = AsyncMock()
+        mock_connection.__aenter__ = AsyncMock(return_value=mock_connection)
+        mock_connection.__aexit__ = AsyncMock(return_value=None)
+
+        registered_handlers = {}
+
+        def capture_handler(event, handler):
+            registered_handlers[event] = handler
+
+        mock_connection.on = MagicMock(side_effect=capture_handler)
+
+        mock_v1 = MagicMock()
+        mock_v1.connect = MagicMock(return_value=mock_connection)
+
+        mock_listen = MagicMock()
+        mock_listen.v1 = mock_v1
+
+        mock_client = AsyncMock()
+        mock_client.listen = mock_listen
+
+        with (
+            patch("custom_components.deepgram_stt.stt.AsyncDeepgramClient", return_value=mock_client),
+            patch("custom_components.deepgram_stt.stt.EventType") as mock_event_type,
+        ):
+            mock_event_type.MESSAGE = "MESSAGE"
+            mock_event_type.ERROR = "ERROR"
+
+            task = asyncio.create_task(entity.async_process_audio_stream(mock_metadata, mock_stream))
+
+            await asyncio.sleep(0.2)
+
+            message_handler = registered_handlers.get("MESSAGE")
+            assert message_handler is not None
+
+            # Metadata messages have a 'channels' int and must be ignored
+            metadata_message = ListenV1Metadata.model_validate({
+                "type": "Metadata",
+                "transaction_key": "key",
+                "request_id": "req-id",
+                "sha256": "sha",
+                "created": "now",
+                "duration": 1.0,
+                "channels": 1,
+            })
+            await message_handler(metadata_message)
+
+            # Results messages carry the transcript
+            results_message = ListenV1Results.model_validate({
+                "type": "Results",
+                "channel_index": [0, 1],
+                "duration": 1.0,
+                "start": 0.0,
+                "is_final": True,
+                "channel": {
+                    "alternatives": [
+                        {"transcript": "hello world", "confidence": 0.9, "words": []}
+                    ]
+                },
+                "metadata": {
+                    "request_id": "req-id",
+                    "model_info": {"name": "nova-2", "version": "1.0", "arch": "nova-2"},
+                    "model_uuid": "uuid",
+                },
+            })
+            await message_handler(results_message)
+
+            result = await task
+
+            assert result.result == SpeechResultState.SUCCESS
+            assert result.text == "hello world"
+
 
 class TestDeepgramSDKCompatibility:
-    """Test Deepgram SDK v5 API compatibility.
+    """Test Deepgram SDK v7 API compatibility.
 
     These tests ensure we're using the correct SDK methods and catch API
     breaking changes before deployment.
     """
 
-    def test_sdk_v5_imports_available(self):
-        """Test that required SDK v5 imports are available."""
+    def test_sdk_v7_imports_available(self):
+        """Test that required SDK v7 imports are available."""
         # Verify classes are importable (imported at module level)
         assert AsyncDeepgramClient is not None
         assert EventType is not None
 
     @pytest.mark.asyncio
     async def test_real_sdk_connection_api_compatibility(self):
-        """Integration test: verify real SDK has expected v5 API.
+        """Integration test: verify real SDK has expected v7 API.
 
         Verifies the connection object has the methods we expect,
         catching SDK breaking changes.

@@ -8,7 +8,7 @@ import logging
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
-from deepgram.extensions.types.sockets import ListenV1ControlMessage
+from deepgram.listen.v1.types import ListenV1Results
 
 from homeassistant.components.stt import (
     AudioBitRates,
@@ -46,7 +46,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Deepgram STT from config entry."""
-    async_add_entities([DeepgramSTTEntity(config_entry)])
+    await async_add_entities([DeepgramSTTEntity(config_entry)])
 
 
 class DeepgramSTTEntity(SpeechToTextEntity):
@@ -130,12 +130,11 @@ class DeepgramSTTEntity(SpeechToTextEntity):
 
                 _LOGGER.debug("Received message from Deepgram: type=%s", type(message).__name__)
 
-                if not hasattr(message, "channel"):
-                    _LOGGER.warning("Message missing 'channel' attribute: %s", dir(message))
+                if not isinstance(message, ListenV1Results):
                     return
 
                 if not message.channel.alternatives:
-                    _LOGGER.warning("Message channel has no alternatives")
+                    _LOGGER.debug("Message channel has no alternatives")
                     return
 
                 sentence = message.channel.alternatives[0].transcript
@@ -189,7 +188,7 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                     _LOGGER.debug("Audio streaming complete: %d chunks, %d bytes total", chunk_count, total_bytes)
 
                     # Send close stream signal to finalize transcription
-                    await dg_connection.send_control(ListenV1ControlMessage(type="CloseStream"))
+                    await dg_connection.send_close_stream()
                     _LOGGER.debug("Sent CloseStream signal to Deepgram")
 
                     # Wait for final transcript (with timeout)

@@ -11,5 +11,5 @@
   "requirements": [
     "deepgram-sdk==7.16.0"
   ],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
