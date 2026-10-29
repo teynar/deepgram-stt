@@ -254,11 +254,17 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                     _LOGGER.error("Error streaming audio: %s", e)
                     return SpeechResult("", SpeechResultState.ERROR)
                 finally:
-                    # Cancel listening task if still running
+                    # Give the listener a moment to finish after the close
+                    # handshake instead of cancelling it abruptly.
                     if not listen_task.done():
-                        listen_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await listen_task
+                        try:
+                            await asyncio.wait_for(listen_task, timeout=2.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            listen_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await listen_task
+                        except Exception as exc:  # noqa: BLE001
+                            _LOGGER.debug("Listener finished with exception: %s", exc)
 
             # Return result (connection auto-closed by context manager)
             async with state_lock:
