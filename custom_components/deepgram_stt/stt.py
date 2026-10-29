@@ -196,17 +196,19 @@ class DeepgramSTTEntity(SpeechToTextEntity):
                 sentence = message.channel.alternatives[0].transcript
                 _LOGGER.info("[DIAGNOSE] Got transcript fragment: '%s' is_final=%s", sentence, message.is_final)
 
-                if len(sentence) > 0:
-                    async with state_lock:
-                        if message.is_final:
-                            final_transcript = sentence
-                            is_final = True
+                async with state_lock:
+                    if message.is_final:
+                        final_transcript = sentence
+                        is_final = True
+                        if sentence:
                             _LOGGER.debug("Final transcript: %s", sentence)
                         else:
-                            transcript_parts.append(sentence)
-                            _LOGGER.debug("Interim transcript: %s", sentence)
-                else:
-                    _LOGGER.debug("Received empty transcript (silence detection)")
+                            _LOGGER.info("[DIAGNOSE] Empty final transcript received")
+                    elif sentence:
+                        transcript_parts.append(sentence)
+                        _LOGGER.debug("Interim transcript: %s", sentence)
+                    else:
+                        _LOGGER.debug("Received empty transcript (silence detection)")
 
             async def on_error(error, **kwargs):
                 nonlocal error_occurred
