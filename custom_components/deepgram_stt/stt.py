@@ -81,7 +81,7 @@ async def _create_deepgram_client(hass: HomeAssistant, api_key: str) -> AsyncDee
     )
     # Access SDK internals to warm up and cache headers; avoids repeated
     # importlib.metadata blocking IO inside the event loop.
-    client_wrapper = client._raw_client._client_wrapper  # noqa: SLF001
+    client_wrapper = client._client_wrapper  # noqa: SLF001
     cached_headers = await hass.async_add_executor_job(client_wrapper.get_headers)
     client_wrapper.get_headers = lambda: cached_headers
     await _get_ssl_context(hass)
