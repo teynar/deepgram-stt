@@ -48,7 +48,7 @@ def mock_hass():
     hass.config_entries.async_entries = MagicMock()
     hass.config_entries.flow = MagicMock()
     hass.config_entries.flow.async_init = AsyncMock()
-    hass.async_add_executor_job = AsyncMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
     hass.async_create_task = MagicMock()
     return hass
 
@@ -141,10 +141,11 @@ class TestDeepgramSTTAudioProcessing:
     # Coverage achieved through other tests: connection failure, no API key, empty transcript, exceptions
 
     @pytest.mark.asyncio
-    async def test_process_audio_stream_no_api_key(self, mock_config_entry, mock_stream, mock_metadata):
+    async def test_process_audio_stream_no_api_key(self, mock_config_entry, mock_stream, mock_metadata, mock_hass):
         """Test audio processing fails without API key."""
         mock_config_entry.data = {CONF_API_KEY: None}
         entity = DeepgramSTTEntity(mock_config_entry)
+        entity.hass = mock_hass
 
         result = await entity.async_process_audio_stream(mock_metadata, mock_stream)
 
@@ -152,9 +153,10 @@ class TestDeepgramSTTAudioProcessing:
         assert result.result == SpeechResultState.ERROR
 
     @pytest.mark.asyncio
-    async def test_process_audio_stream_connection_fails(self, mock_config_entry, mock_stream, mock_metadata):
+    async def test_process_audio_stream_connection_fails(self, mock_config_entry, mock_stream, mock_metadata, mock_hass):
         """Test audio processing handles connection failure."""
         entity = DeepgramSTTEntity(mock_config_entry)
+        entity.hass = mock_hass
 
         # Mock connection that raises exception on enter
         mock_connection = AsyncMock()
@@ -176,9 +178,10 @@ class TestDeepgramSTTAudioProcessing:
             assert result.result == SpeechResultState.ERROR
 
     @pytest.mark.asyncio
-    async def test_process_audio_stream_exception(self, mock_config_entry, mock_stream, mock_metadata):
+    async def test_process_audio_stream_exception(self, mock_config_entry, mock_stream, mock_metadata, mock_hass):
         """Test audio processing handles exceptions."""
         entity = DeepgramSTTEntity(mock_config_entry)
+        entity.hass = mock_hass
 
         with patch(
             "custom_components.deepgram_stt.stt.AsyncDeepgramClient",
@@ -190,9 +193,10 @@ class TestDeepgramSTTAudioProcessing:
             assert result.result == SpeechResultState.ERROR
 
     @pytest.mark.asyncio
-    async def test_process_audio_stream_empty_transcript(self, mock_config_entry, mock_stream, mock_metadata):
+    async def test_process_audio_stream_empty_transcript(self, mock_config_entry, mock_stream, mock_metadata, mock_hass):
         """Test audio processing handles empty transcript."""
         entity = DeepgramSTTEntity(mock_config_entry)
+        entity.hass = mock_hass
 
         # Mock connection with async context manager
         mock_connection = AsyncMock()
@@ -287,9 +291,10 @@ class TestDeepgramSTTEventHandlers:
     """Test Deepgram event handlers."""
 
     @pytest.mark.asyncio
-    async def test_on_error_handler(self, mock_config_entry):
+    async def test_on_error_handler(self, mock_config_entry, mock_hass):
         """Test on_error handler sets error flag."""
         entity = DeepgramSTTEntity(mock_config_entry)
+        entity.hass = mock_hass
 
         mock_metadata = SpeechMetadata(
             language="pl",
@@ -355,9 +360,10 @@ class TestDeepgramSTTEventHandlers:
             assert result.result == SpeechResultState.ERROR
 
     @pytest.mark.asyncio
-    async def test_on_message_handler_ignores_metadata_and_processes_results(self, mock_config_entry):
+    async def test_on_message_handler_ignores_metadata_and_processes_results(self, mock_config_entry, mock_hass):
         """Test on_message handles SDK v7 typed messages correctly."""
         entity = DeepgramSTTEntity(mock_config_entry)
+        entity.hass = mock_hass
 
         mock_metadata = SpeechMetadata(
             language="pl",

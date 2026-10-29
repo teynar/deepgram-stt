@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
+from typing import Any
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
+from deepgram.listen.v1 import client as dg_v1_client
 from deepgram.listen.v1.types import ListenV1Results
 
 from homeassistant.components.stt import (
@@ -38,6 +41,51 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_orig_websockets_connect: Any = dg_v1_client.websockets_client_connect
+
+
+class _SslContextCache:
+    """Module-level cache for a default SSL context."""
+
+    context: ssl.SSLContext | None = None
+
+
+async def _get_ssl_context(hass: HomeAssistant) -> ssl.SSLContext:
+    """Return a cached default SSL context created outside the event loop."""
+    if _SslContextCache.context is None:
+        _SslContextCache.context = await hass.async_add_executor_job(
+            ssl.create_default_context
+        )
+        dg_v1_client.websockets_client_connect = _wrap_websockets_connect(
+            _orig_websockets_connect, _SslContextCache.context
+        )
+    return _SslContextCache.context
+
+
+def _wrap_websockets_connect(orig_connect: Any, ssl_context: ssl.SSLContext) -> Any:
+    """Wrap websockets connect to reuse a pre-built SSL context."""
+
+    def wrapper(uri: str, **kwargs: Any) -> Any:
+        if kwargs.get("ssl") is None and uri.startswith("wss:"):
+            kwargs["ssl"] = ssl_context
+        return orig_connect(uri, **kwargs)
+
+    return wrapper
+
+
+async def _create_deepgram_client(hass: HomeAssistant, api_key: str) -> AsyncDeepgramClient:
+    """Create a Deepgram client outside the event loop and cache its headers."""
+    client = await hass.async_add_executor_job(
+        lambda: AsyncDeepgramClient(api_key=api_key)
+    )
+    # Access SDK internals to warm up and cache headers; avoids repeated
+    # importlib.metadata blocking IO inside the event loop.
+    client_wrapper = client._raw_client._client_wrapper  # noqa: SLF001
+    cached_headers = await hass.async_add_executor_job(client_wrapper.get_headers)
+    client_wrapper.get_headers = lambda: cached_headers
+    await _get_ssl_context(hass)
+    return client
 
 
 async def async_setup_entry(
@@ -114,8 +162,8 @@ class DeepgramSTTEntity(SpeechToTextEntity):
             return SpeechResult("", SpeechResultState.ERROR)
 
         try:
-            # Configure Deepgram client
-            client = AsyncDeepgramClient(api_key=self._api_key)
+            # Configure Deepgram client (created in executor to avoid blocking IO)
+            client = await _create_deepgram_client(self.hass, self._api_key)
 
             # Storage for transcript
             transcript_parts = []
